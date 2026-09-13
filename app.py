@@ -18,7 +18,6 @@ st.logo("static/img/pacaf_money_logo.png", size="medium",
        icon_image="static/img/pacaf_money_logo.png")
 
 DEFAULT_TYPES = ["SUV", "Compact", "Full Size"]
-ROW_COLUMNS = ["Type", "Quantity", "Unit Cost"]
 FM_ITEMS = {"Vehical": ["SUV", "Compact", "Full Size"],
             "Logging": ["Base", "Commercial"],
             "Air Frame": ["F-15", "F-22", "F-35"],
@@ -39,6 +38,10 @@ def update_widget_state(gid, new_value):
 if "groups" not in st.session_state:
     st.session_state.group_counter = len(GROUPS)
     st.session_state.groups = [helper.make_group(i) for i in GROUPS]
+
+# Custom types the user has added, keyed by group name. Kept in session state
+# (rather than mutating FM_ITEMS) so they survive Streamlit's script reruns.
+st.session_state.setdefault("custom_types", {})
 
 # Cached dataset loading mapped to helper function
 @st.cache_data(show_spinner=False)
@@ -97,6 +100,11 @@ with st.sidebar:
             if helper.norm(t) not in known:
                 type_options.append(t)
                 known.add(helper.norm(t))
+    for custom_list in st.session_state.custom_types.values():
+        for t in custom_list:
+            if helper.norm(t) not in known:
+                type_options.append(t)
+                known.add(helper.norm(t))
                 
     st.divider()
     st.subheader("Line items")
@@ -109,23 +117,30 @@ with st.sidebar:
         gid = group["id"]
         with st.expander(group["name"], expanded=True):
             #--------
-            current_type_options = FM_ITEMS.get(group["name"], list(DEFAULT_TYPES))
-            
+            # Built-in types for this group, plus any custom types the user
+            # has added previously (stored in session_state so they survive
+            # Streamlit's script reruns instead of vanishing).
+            base_type_options = FM_ITEMS.get(group["name"], list(DEFAULT_TYPES))
+            custom_options = st.session_state.custom_types.get(group["name"], [])
+            current_type_options = base_type_options + [
+                t for t in custom_options if t not in base_type_options
+            ]
+
             # 2. Check for and process a newly submitted custom type
             # This input value comes from the st.text_input further down.
             new_option = st.session_state.get(f"new_input_{gid}", "").strip()
             if new_option and new_option not in current_type_options:
-                # Add the new option to the source list
-                FM_ITEMS[group["name"]].append(new_option)
+                # Persist the new option for this group
+                st.session_state.custom_types.setdefault(group["name"], []).append(new_option)
                 # Set the selectbox to this new option
                 st.session_state[f"type_{gid}"] = new_option
                 # Clear the text input for the next use
                 st.session_state[f"new_input_{gid}"] = ""
                 # Rerun to update the selectbox options and selection
                 st.rerun()
-        
+
             # 3. Prepare options for display and manage default selection
-            display_options = FM_ITEMS.get(group["name"], []) + ["+ Add new custom type..."]
+            display_options = current_type_options + ["+ Add new custom type..."]
             
             # Ensure the current selection is valid
             if st.session_state.get(f"type_{gid}") not in display_options:
