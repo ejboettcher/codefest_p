@@ -1,0 +1,14 @@
+Group,Type,Per Day
+Vehical,SUV,TRUE
+Vehical,Compact,True
+Vehical,Full Size,FALSE
+Logging,Base,FALSE
+Logging,Commercial,FALSE
+Air Frame,F-15,True
+Air Frame,F-22,FALSE
+Air Frame,F-35,FALSE
+Facilities,Porta Potty,FALSE
+Facilities,Other,FALSE
+Facilities,Lockers,FALSE
+Fuel,MIL AR,FALSE
+Fuel,COMAR,FALSE

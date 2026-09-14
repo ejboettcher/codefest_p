@@ -132,7 +132,7 @@ with st.sidebar:
             column_config={
                 "Group": st.column_config.TextColumn("Group", required=True),
                 "Type": st.column_config.TextColumn("Type", required=True),
-                "Per Day": st.column_config.CheckboxColumn("× Days", default=False),
+                "Per Day": st.column_config.CheckboxColumn("× Days", default=True),
             },
         )
         cleaned_config = helper.clean_fm_config(edited_config)
