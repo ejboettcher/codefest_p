@@ -1,6 +1,7 @@
 import io
+import json
 import uuid
- 
+
 import altair as alt
 import numpy as np
 import pandas as pd
@@ -9,6 +10,8 @@ import streamlit as st
 # Helpers: data
 # ---------------------------------------------------------------------------
 ROW_COLUMNS = ["Type", "Quantity", "Unit Cost"]
+FM_CONFIG_COLUMNS = ["Group", "Type", "Per Day"]
+DEFAULT_FM_CONFIG_PATH = "config/fm_items.csv"
 
 
 def norm(value) -> str:
@@ -88,6 +91,51 @@ def apply_editor_changes(base: pd.DataFrame, state) -> pd.DataFrame:
     return df.reset_index(drop=True)[ROW_COLUMNS]
  
  
+def copy_table_html(df: pd.DataFrame, label: str = "📋 Copy table") -> str:
+    """A small self-contained button that copies `df` (tab-separated, so it
+    pastes into a spreadsheet as columns) to the clipboard.
+
+    st.dataframe's built-in toolbar (search / download / fullscreen) has no
+    slot for a custom "copy" icon, so this renders as a standalone button via
+    st.iframe instead, placed next to the table.
+    """
+    tsv = df.to_csv(sep="\t", index=False)
+    payload = json.dumps(tsv)
+    button_id = f"copy-btn-{uuid.uuid4().hex[:8]}"
+    return f"""
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;">
+      <button id="{button_id}" style="
+        font-size: 14px; padding: 0.35rem 0.9rem; border-radius: 0.5rem;
+        border: 1px solid rgba(49, 51, 63, 0.2); background: transparent;
+        cursor: pointer; color: inherit;">{label}</button>
+    </div>
+    <script>
+      (function() {{
+        const text = {payload};
+        const btn = document.getElementById("{button_id}");
+        const original = btn.textContent;
+        btn.addEventListener("click", async function() {{
+          try {{
+            await navigator.clipboard.writeText(text);
+          }} catch (err) {{
+            const ta = document.createElement("textarea");
+            ta.value = text;
+            ta.style.position = "fixed";
+            ta.style.opacity = "0";
+            document.body.appendChild(ta);
+            ta.focus();
+            ta.select();
+            document.execCommand("copy");
+            document.body.removeChild(ta);
+          }}
+          btn.textContent = "Copied!";
+          setTimeout(() => {{ btn.textContent = original; }}, 1200);
+        }});
+      }})();
+    </script>
+    """
+
+
 def clean_rows(df: pd.DataFrame) -> pd.DataFrame:
     """Drop incomplete rows and coerce numbers so the totals are safe to compute."""
     df = df.copy()
@@ -98,6 +146,95 @@ def clean_rows(df: pd.DataFrame) -> pd.DataFrame:
     return df
  
  
+# ---------------------------------------------------------------------------
+# Helpers: FM_ITEMS config (which groups/types exist, and which scale by Days)
+# ---------------------------------------------------------------------------
+def _to_bool(value) -> bool:
+    """Parse a CSV/editor cell as a boolean (TRUE/FALSE, yes/no, 1/0, ...)."""
+    if isinstance(value, bool):
+        return value
+    if pd.isna(value):
+        return False
+    return str(value).strip().lower() in {"true", "1", "yes", "y", "days", "daily"}
+
+
+def empty_fm_config() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "Group": pd.Series(dtype="object"),
+            "Type": pd.Series(dtype="object"),
+            "Per Day": pd.Series(dtype="bool"),
+        }
+    )
+
+
+def clean_fm_config(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop incomplete rows and coerce types after a CSV load or in-app edit."""
+    df = df.copy()
+    for col in FM_CONFIG_COLUMNS:
+        if col not in df.columns:
+            df[col] = False if col == "Per Day" else ""
+    df["Group"] = df["Group"].astype("string").str.strip()
+    df["Type"] = df["Type"].astype("string").str.strip()
+    df = df[df["Group"].notna() & (df["Group"] != "") & df["Type"].notna() & (df["Type"] != "")]
+    df["Per Day"] = df["Per Day"].apply(_to_bool)
+    # Last edit for a given (Group, Type) pair wins; keep first-seen order.
+    df = df.drop_duplicates(subset=["Group", "Type"], keep="last")
+    return df.reset_index(drop=True)[FM_CONFIG_COLUMNS]
+
+
+def load_fm_config(path_or_buffer) -> pd.DataFrame:
+    """Load the Group/Type/Per Day config from a CSV file path or uploaded file."""
+    df = pd.read_csv(path_or_buffer)
+    df.columns = [str(c).strip() for c in df.columns]
+    return clean_fm_config(df)
+
+
+def add_type_to_config(config: pd.DataFrame, group: str, type_name: str, per_day: bool = False) -> pd.DataFrame:
+    """Append a new (Group, Type) row, unless that pair is already present."""
+    group = str(group).strip()
+    type_name = str(type_name).strip()
+    exists = (
+        (config["Group"].str.lower() == group.lower()) & (config["Type"].str.lower() == type_name.lower())
+    ).any()
+    if exists or not type_name:
+        return config
+    new_row = pd.DataFrame([{"Group": group, "Type": type_name, "Per Day": per_day}])
+    return clean_fm_config(pd.concat([config, new_row], ignore_index=True))
+
+
+def fm_items_from_config(config: pd.DataFrame) -> dict:
+    """Group -> ordered list of unique type names, for the sidebar dropdowns."""
+    items = {}
+    for group, sub in config.groupby("Group", sort=False):
+        seen = []
+        for t in sub["Type"]:
+            if t not in seen:
+                seen.append(t)
+        items[group] = seen
+    return items
+
+
+def type_multiplier_flags(config: pd.DataFrame) -> dict:
+    """norm(type) -> True if that type's cost should scale with Days, not a flat 1x."""
+    return {norm(t): bool(p) for t, p in zip(config["Type"], config["Per Day"])}
+
+
+def cost_multiplier(type_key: str, flags: dict, days) -> float:
+    """The factor a line's Quantity × Unit Cost is scaled by: `days` if flagged, else 1."""
+    return float(days) if flags.get(type_key, False) else 1.0
+
+
+def days_between(start, end) -> int:
+    """Inclusive day count from start to end (a single day counts as 1).
+
+    Returns 0 if either date is missing or end is before start.
+    """
+    if start is None or end is None or end < start:
+        return 0
+    return (end - start).days + 1
+
+
 # ---------------------------------------------------------------------------
 # Helpers: session state for the sidebar groups
 # ---------------------------------------------------------------------------

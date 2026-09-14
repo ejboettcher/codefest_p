@@ -3,6 +3,8 @@ Vehicle Cost Estimator (PACES)
 Run with: streamlit run app.py
 """
 
+from datetime import date
+
 from PIL import Image
 import altair as alt
 import numpy as np
@@ -17,17 +19,6 @@ st.set_page_config(page_title="PACES", layout="wide")
 st.logo("static/img/pacaf_money_logo.png", size="medium", 
        icon_image="static/img/pacaf_money_logo.png")
 
-DEFAULT_TYPES = ["SUV", "Compact", "Full Size"]
-FM_ITEMS = {"Vehical": ["SUV", "Compact", "Full Size"],
-            "Logging": ["Base", "Commercial"],
-            "Air Frame": ["F-15", "F-22", "F-35"],
-            "Facilities": ["Porta Potty", "Other", "Lockers"], 
-            "Fuel": ["MIL AR", "COMAR" ],                        
-           }
-GROUPS = FM_ITEMS.keys()
-DEFAULT_TYPES = DEFAULT_TYPES = [item for k in FM_ITEMS.values() for item in k]
-DAYS = 0
-
 def update_widget_state(gid, new_value):
     # This runs BEFORE the script executes top-to-bottom, avoiding the exception
     st.session_state[f"type_{gid}"] = new_value.strip()
@@ -35,13 +26,29 @@ def update_widget_state(gid, new_value):
 # ---------------------------------------------------------------------------
 # Session State Initialization
 # ---------------------------------------------------------------------------
+# FM_ITEMS (which Group each Type belongs to, and whether its cost scales with
+# Days) is loaded once from a CSV config file, then kept in session state so
+# it can be edited in-app or replaced by uploading a different CSV.
+if "fm_config" not in st.session_state:
+    try:
+        st.session_state.fm_config = helper.load_fm_config(helper.DEFAULT_FM_CONFIG_PATH)
+    except Exception:  # noqa: BLE001 - missing/bad file: start from an empty config
+        st.session_state.fm_config = helper.empty_fm_config()
+
+st.session_state.setdefault("start_date", date.today())
+st.session_state.setdefault("end_date", date.today())
+st.session_state.setdefault("days", 1)
+
+# Everything below is derived fresh from fm_config on every rerun, so edits
+# made in the "Manage cost groups & types" panel take effect immediately.
+FM_ITEMS = helper.fm_items_from_config(st.session_state.fm_config)
+GROUPS = list(FM_ITEMS.keys())
+DEFAULT_TYPES = [item for types in FM_ITEMS.values() for item in types]
+TYPE_PER_DAY = helper.type_multiplier_flags(st.session_state.fm_config)
+
 if "groups" not in st.session_state:
     st.session_state.group_counter = len(GROUPS)
     st.session_state.groups = [helper.make_group(i) for i in GROUPS]
-
-# Custom types the user has added, keyed by group name. Kept in session state
-# (rather than mutating FM_ITEMS) so they survive Streamlit's script reruns.
-st.session_state.setdefault("custom_types", {})
 
 # Cached dataset loading mapped to helper function
 @st.cache_data(show_spinner=False)
@@ -59,7 +66,67 @@ with st.sidebar:
         st.image(image, use_container_width=True)
     
     st.header("Cost Builder")
-    
+
+    d1, d2 = st.columns(2)
+    d1.date_input("Start date", key="start_date")
+    d2.date_input("End date", key="end_date")
+
+    if st.session_state.end_date < st.session_state.start_date:
+        st.error("End date is before start date — Days is treated as 0.")
+
+    st.session_state.days = helper.days_between(st.session_state.start_date, st.session_state.end_date)
+    st.caption(
+        f"Days: **{st.session_state.days}** — types marked '× Days' below have their "
+        "unit cost multiplied by this value instead of a flat 1x when totals are computed."
+    )
+
+    with st.expander("⚙️ Manage cost groups & types", expanded=False):
+        st.caption(
+            "Define the Group/Type options offered below. Check '× Days' for types "
+            "whose cost should scale with the Days value above instead of a flat 1x."
+        )
+        config_upload = st.file_uploader(
+            "Load from CSV", type=["csv"], key="fm_config_upload",
+            help="Columns: Group, Type, Per Day (TRUE/FALSE).",
+        )
+        if config_upload is not None:
+            upload_sig = (config_upload.name, config_upload.size)
+            if st.session_state.get("_fm_config_upload_sig") != upload_sig:
+                try:
+                    st.session_state.fm_config = helper.load_fm_config(config_upload)
+                    st.session_state._fm_config_upload_sig = upload_sig
+                    st.rerun()
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"Couldn't read {config_upload.name}: {exc}")
+
+        edited_config = st.data_editor(
+            st.session_state.fm_config,
+            key="fm_config_editor",
+            num_rows="dynamic",
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "Group": st.column_config.TextColumn("Group", required=True),
+                "Type": st.column_config.TextColumn("Type", required=True),
+                "Per Day": st.column_config.CheckboxColumn("× Days", default=False),
+            },
+        )
+        cleaned_config = helper.clean_fm_config(edited_config)
+        if not cleaned_config.equals(st.session_state.fm_config):
+            # Rerun immediately so the Group/Type dropdowns below pick up the
+            # edit right away, instead of lagging a run behind (Streamlit only
+            # reflects a state change from the point it happens onward).
+            st.session_state.fm_config = cleaned_config
+            st.rerun()
+
+        st.download_button(
+            "Download config (CSV)",
+            st.session_state.fm_config.to_csv(index=False).encode(),
+            file_name="fm_items.csv",
+            mime="text/csv",
+            width="stretch",
+        )
+
     uploaded = st.file_uploader(
         "Cost dataset (CSV or Excel)",
         type=["csv", "xlsx", "xls"],
@@ -100,12 +167,7 @@ with st.sidebar:
             if helper.norm(t) not in known:
                 type_options.append(t)
                 known.add(helper.norm(t))
-    for custom_list in st.session_state.custom_types.values():
-        for t in custom_list:
-            if helper.norm(t) not in known:
-                type_options.append(t)
-                known.add(helper.norm(t))
-                
+
     st.divider()
     st.subheader("Line items")
     
@@ -117,21 +179,20 @@ with st.sidebar:
         gid = group["id"]
         with st.expander(group["name"], expanded=True):
             #--------
-            # Built-in types for this group, plus any custom types the user
-            # has added previously (stored in session_state so they survive
-            # Streamlit's script reruns instead of vanishing).
-            base_type_options = FM_ITEMS.get(group["name"], list(DEFAULT_TYPES))
-            custom_options = st.session_state.custom_types.get(group["name"], [])
-            current_type_options = base_type_options + [
-                t for t in custom_options if t not in base_type_options
-            ]
+            # Types configured for this group in fm_config (the "Manage cost
+            # groups & types" panel above), which is the single source of
+            # truth for Group/Type options.
+            current_type_options = FM_ITEMS.get(group["name"], list(DEFAULT_TYPES))
 
             # 2. Check for and process a newly submitted custom type
             # This input value comes from the st.text_input further down.
             new_option = st.session_state.get(f"new_input_{gid}", "").strip()
             if new_option and new_option not in current_type_options:
-                # Persist the new option for this group
-                st.session_state.custom_types.setdefault(group["name"], []).append(new_option)
+                # Persist the new option into fm_config for this group, so it
+                # shows up in the config editor and survives reruns.
+                st.session_state.fm_config = helper.add_type_to_config(
+                    st.session_state.fm_config, group["name"], new_option
+                )
                 # Set the selectbox to this new option
                 st.session_state[f"type_{gid}"] = new_option
                 # Clear the text input for the next use
@@ -207,8 +268,12 @@ with st.sidebar:
 st.title("PACES (Predictive Analytic Cost Execution Simulator)")
 
 entries = helper.clean_rows(pd.concat(group_tables, ignore_index=True)) if group_tables else helper.clean_rows(helper.empty_rows())
-entries["Line Total"] = entries["Quantity"] * entries["Unit Cost"]
 entries["key"] = entries["Type"].map(helper.norm)
+# Types flagged "× Days" in the group/type config scale by the Days value
+# above instead of a flat 1x (e.g. a daily rate rather than a one-time cost).
+days = st.session_state.get("days", 1)
+entries["Multiplier"] = entries["key"].map(lambda k: helper.cost_multiplier(k, TYPE_PER_DAY, days))
+entries["Line Total"] = entries["Quantity"] * entries["Unit Cost"] * entries["Multiplier"]
 
 if entries.empty and stats is None:
     st.info(
@@ -237,13 +302,18 @@ else:
 summary[["Units", "Total"]] = summary[["Units", "Total"]].fillna(0)
 summary["Avg Unit Cost"] = np.where(summary["Units"] > 0, summary["Total"] / summary["Units"].replace(0, np.nan), np.nan)
 
+# A type's total scales by its × Days multiplier, so its uncertainty does too.
+summary["Multiplier"] = summary["key"].map(lambda k: helper.cost_multiplier(k, TYPE_PER_DAY, days))
+
 # Calculate total deviation
-summary["Total σ"] = summary["std"] * np.sqrt(summary["Units"])
+summary["Total σ"] = summary["std"] * np.sqrt(summary["Units"]) * summary["Multiplier"]
 summary = summary.sort_values(["Total", "Type"], ascending=[False, True]).reset_index(drop=True)
 
 grand_total = float(entries["Line Total"].sum())
 total_units = int(entries["Quantity"].sum())
-combined_sigma = float(np.sqrt((summary["Units"] * summary["std"].fillna(0) ** 2).sum()))
+combined_sigma = float(
+    np.sqrt((summary["Units"] * summary["std"].fillna(0) ** 2 * summary["Multiplier"] ** 2).sum())
+)
 
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Total cost", f"${grand_total:,.2f}")
@@ -253,7 +323,8 @@ m4.metric(
     "Total σ",
     f"±${combined_sigma:,.0f}" if stats is not None else "—",
     help="Estimated spread of the total cost, assuming each unit's cost varies "
-    "independently with its type's standard deviation from the dataset: √Σ(units × σ²).",
+    "independently with its type's standard deviation from the dataset: "
+    "√Σ(units × σ × multiplier)², where multiplier is Days for '× Days' types, else 1.",
 )
 
 missing = summary[(summary["Units"] > 0) & summary["std"].isna()]["Type"].tolist()
@@ -266,8 +337,18 @@ elif missing:
     )
 
 st.subheader("Totals by type")
+summary_display_cols = {
+    "Type": "Type",
+    "Units": "Units",
+    "Total": "Total cost",
+    "Avg Unit Cost": "Avg unit cost (entered)",
+    "mean": "Dataset mean",
+    "std": "Dataset σ (per unit)",
+    "n": "Dataset records",
+    "Total σ": "σ of total",
+}
 st.dataframe(
-    summary[["Type", "Units", "Total", "Avg Unit Cost", "mean", "std", "n", "Total σ"]],
+    summary[list(summary_display_cols)],
     hide_index=True,
     width="stretch",
     column_config={
@@ -277,8 +358,14 @@ st.dataframe(
         "mean": st.column_config.NumberColumn("Dataset mean", format="dollar"),
         "std": st.column_config.NumberColumn("Dataset σ (per unit)", format="dollar"),
         "n": st.column_config.NumberColumn("Dataset records", format="%d"),
-        "Total σ": st.column_config.NumberColumn("σ of total", format="dollar", help="Dataset σ × √units"),
+        "Total σ": st.column_config.NumberColumn(
+            "σ of total", format="dollar", help="Dataset σ × √units × multiplier (Days for '× Days' types, else 1)"
+        ),
     },
+)
+st.iframe(
+    helper.copy_table_html(summary[list(summary_display_cols)].rename(columns=summary_display_cols)),
+    height=44,
 )
 
 chart_df = summary[summary["Total"] > 0].rename(columns={"Total": "total", "Total σ": "sigma"})
@@ -302,7 +389,7 @@ if not chart_df.empty:
     st.caption("Whiskers show ± one standard deviation of each type's total.")
 
 with st.expander("All line items"):
-    detail = entries[["Group", "Type", "Quantity", "Unit Cost", "Line Total"]]
+    detail = entries[["Group", "Type", "Quantity", "Unit Cost", "Multiplier", "Line Total"]]
     st.dataframe(
         detail,
         hide_index=True,
@@ -310,6 +397,9 @@ with st.expander("All line items"):
         column_config={
             "Quantity": st.column_config.NumberColumn(format="%d"),
             "Unit Cost": st.column_config.NumberColumn(format="dollar"),
+            "Multiplier": st.column_config.NumberColumn(
+                "× Days?", format="%.0f", help="1 for a flat cost, or the Days value for a per-day cost."
+            ),
             "Line Total": st.column_config.NumberColumn(format="dollar"),
         },
     )
