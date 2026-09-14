@@ -16,8 +16,32 @@ import app_helper as helper
 
 st.set_page_config(page_title="PACES", layout="wide")
 
-st.logo("static/img/pacaf_money_logo.png", size="medium", 
+st.logo("static/img/pacaf_money_logo.png", size="medium",
        icon_image="static/img/pacaf_money_logo.png")
+
+# Bold, larger, Air Force blue styling for the titles above each results
+# table. Scoped to just these three (via the anchor/key hooks below) rather
+# than every st.subheader/st.expander in the app.
+#
+# Note: this can't reach the column-header row *inside* st.dataframe /
+# st.data_editor (e.g. "Type", "Units", "Total cost") — that row is painted
+# on a <canvas> by Streamlit's grid component from its theme, not real HTML,
+# so no CSS selector can touch it.
+AIR_FORCE_BLUE = "#00308F"
+st.markdown(
+    f"""
+    <style>
+    #totals-by-type,
+    .st-key-all_line_items summary,
+    .st-key-dataset_cost_stats summary {{
+        font-weight: 700 !important;
+        font-size: 1.35rem !important;
+        color: {AIR_FORCE_BLUE} !important;
+    }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 def update_widget_state(gid, new_value):
     # This runs BEFORE the script executes top-to-bottom, avoiding the exception
@@ -336,7 +360,7 @@ elif missing:
         + ". These types are missing from the dataset or have only one cost record."
     )
 
-st.subheader("Totals by type")
+st.subheader("Totals by type", anchor="totals-by-type")
 summary_display_cols = {
     "Type": "Type",
     "Units": "Units",
@@ -388,7 +412,7 @@ if not chart_df.empty:
     st.altair_chart((bars + whiskers).properties(height=340), width="stretch")
     st.caption("Whiskers show ± one standard deviation of each type's total.")
 
-with st.expander("All line items"):
+with st.expander("All line items", key="all_line_items"):
     detail = entries[["Group", "Type", "Quantity", "Unit Cost", "Multiplier", "Line Total"]]
     st.dataframe(
         detail,
@@ -412,7 +436,7 @@ with st.expander("All line items"):
     )
 
 if stats is not None:
-    with st.expander("Dataset cost statistics"):
+    with st.expander("Dataset cost statistics", key="dataset_cost_stats"):
         st.dataframe(
             stats[["Type", "n", "mean", "std", "min", "max"]],
             hide_index=True,
